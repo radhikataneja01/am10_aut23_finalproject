@@ -1,0 +1,337 @@
+---
+title: "Group 5 Poster Presentation Project"
+author: "Group 5"
+date: "`r Sys.Date()`"
+output: 
+    html_document:
+      number_sections: true
+      highlight: zenburn
+      theme: flatly
+      toc: yes
+      toc_depth: 2
+      toc_float:
+        collapsed: false
+      fontsize: 10pt
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(lubridate)
+library(vroom)
+library(janitor)
+library(skimr)
+library(vroom)
+library(mice) 
+library(VIM)
+library(countrycode)
+library(rvest)
+library(readr)
+library(treemapify)
+library(wordcloud)
+library(tm)
+```
+
+# Collect Data
+
+```{r}
+url <- "https://en.wikipedia.org/wiki/List_of_best-selling_game_consoles"
+webpage <- read_html(url)
+tables <- html_table(webpage, fill = TRUE)
+console_sales <- tables[[1]]
+console_sales_clean <- console_sales %>%
+  mutate(
+    `Units sold` = gsub("–.*", "", `Units sold`),  # Take the value after '–' in case of a range
+    `Units sold` = as.numeric(gsub("[^0-9.]", "", `Units sold`)),  # Keep decimal points
+    Platform = gsub("\\[.*\\]", "", Platform),  # Remove text in brackets
+    `Released[2]` = gsub(",.*", "", `Released[2]`),  # Keep only the first year
+    `Released[2]` = ymd(paste0(`Released[2]`, "-01-01"))) %>%  # Convert to Date
+  rename_with(~ gsub(" ", "_", .), everything()) %>%  # Replace space with underscore in all column names
+  rename(Released = `Released[2]`) %>%   # Rename 'Released[2]' to 'Released'
+  mutate(Units_sold = if_else(Platform == "Oculus Quest", Units_sold/1000000, Units_sold)) %>% 
+  select(-Ref.) %>% 
+  mutate(Platform = gsub("[#†‡•]", "", Platform))
+```
+
+```{r}
+url <- "https://sonyinteractive.com/en/our-company/business-data-sales/"
+page <- read_html(url)
+
+tables <- page %>% html_table(fill = TRUE)
+
+# Process PS4 data
+ps4 <- tables[[3]]
+ps4 <- ps4 %>%
+  # Set column names
+  setNames(nm = c("Year", "Q1", "Q2", "Q3", "Q4", "FY")) %>%
+  # Remove the first row which is now redundant
+  slice(-1) %>%
+  mutate(
+    Year = as.integer(gsub("FY", "", Year)),
+    across(Q1:FY, ~ as.numeric(gsub("–", NA, .x))),
+    Console = 'PS4'
+  ) %>%
+  select(Year, FY, Console)
+
+# Process PS5 data
+ps5 <- tables[[4]]
+ps5 <- ps5 %>%
+  # Set column names
+  setNames(nm = c("Year", "Q1", "Q2", "Q3", "Q4", "FY")) %>%
+  # Remove the first row which is now redundant
+  slice(-1) %>%
+  mutate(
+    Year = as.integer(gsub("FY", "", Year)),
+    across(Q1:FY, ~ as.numeric(gsub("–", NA, .x))),
+    Console = 'PS5'
+  ) %>%
+  select(Year, FY, Console)
+
+
+ps <- union(ps4,ps5)%>%
+  mutate(Year = ymd(paste0(Year, "-01-01")))  # Convert Year to Date format
+```
+
+```{r}
+video_game_sales <- read_csv("vgsales.csv")
+video_game_sales_clean <- video_game_sales %>%
+  select(-position) %>%
+  mutate(release_date = dmy(release_date),
+         last_update = dmy(last_update),
+         total_shipped = as.double(gsub("m", "", total_shipped)),
+         total_sales = as.double(gsub("m", "", total_sales)),
+         total_sales_millions = if_else(is.na(total_shipped), total_sales, total_shipped),
+         total_sales_millions = as.double(total_sales_millions), # Ensure this column is a double
+         vgchart_score = as.double(vgchart_score),
+         critic_score = as.double(critic_score),
+         user_score = as.double(user_score),
+         na_sales = as.double(gsub("m", "", na_sales)),
+         pal_sales = as.double(gsub("m", "", pal_sales)),
+         japan_sales = as.double(gsub("m", "", japan_sales)),
+         other_sales = as.double(gsub("m", "", other_sales))) %>%
+  filter(!is.na(total_sales_millions)) %>%   # Filter out rows where total_sales_millions is NA
+  select(-total_shipped,-total_sales)
+
+# Splitting the dataset into two tibbles
+series_games <- filter(video_game_sales_clean, console == "Series")
+other_games <- filter(video_game_sales_clean, console != "Series")
+```
+
+```{r}
+url <- "https://www.esportsearnings.com/tournaments"
+webpage <- read_html(url)
+tables <- html_table(webpage, fill = TRUE)
+tournament_data <- tables[[1]]
+tournament_data_clean <- tournament_data %>%
+  select(2:4) %>%
+  setNames(c("Tournament", "Prizepool", "Game")) %>%
+  clean_names() %>%
+  slice(-51) %>%   # Remove the 51th row which had junk values
+  mutate(prizepool = as.integer(gsub("[\\$,]", "", prizepool)), # Remove $ and commas, convert to integer
+         game = str_replace(game, "PLAYERUNKNOWN’S BATTLEGROUNDS", "PUBG"),
+         game = str_replace(game, "PLAYERUNKNOWN'S BATTLEGROUNDS Mobile", "PUBG Mobile"))  
+```
+
+# Visualizations
+
+```{r, fig.width=9, fig.height=6}
+yearly_sales <- other_games %>%
+  mutate(year = year(release_date)) %>%
+  group_by(year) %>%
+  summarise(total_sales = sum(total_sales_millions, na.rm = TRUE))
+
+ggplot(yearly_sales, aes(x = year, y = total_sales)) +
+  geom_line(color = "black", size = 1) +  # Add a line
+    ggplot2::annotate("text", x = 2011, y = 1250, label = "2011", size = 4, vjust = -1) +
+  labs(title = "Video Games Go From Humble Beginnings to Multi-Billion Dollar Industry",
+       subtitle = "Total Sales for Video Games Released Each Year",
+       x = "Year",
+       y = "Total Units Sold (Millions)") +
+  theme_minimal() 
+```
+
+```{r}
+# Convert the 'release_date' to a Date object if it's not already
+video_game_sales_clean$release_date <- as.Date(video_game_sales_clean$release_date)
+
+# Extract the year from the 'release_date'
+video_game_sales_clean$year <- year(video_game_sales_clean$release_date)
+
+# Create a new data frame with the count of games released each year
+yearly_game_count <- video_game_sales_clean %>%
+  filter(year >= 1980, year <= 2016) %>% # Filter years from 1980 to 2016
+  group_by(year) %>%
+  summarise(number_of_games = n())
+
+# Now plot the data using ggplot2
+ggplot(yearly_game_count, aes(x = year, y = number_of_games)) +
+  geom_bar(stat = "identity", fill = "#6d496e") +
+  labs(title = "Number of Games Released from 1980 to 2016",
+       x = "Year",
+       y = "Number of Games") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+```{r,fig.width=9, fig.height=6}
+
+
+console_sales_clean <- console_sales_clean %>% 
+  mutate(Company = case_when(
+    Firm == "Sony" ~ "Sony",
+    Firm == "Microsoft" ~ "Microsoft",
+    Firm == "Nintendo" ~ "Nintendo",
+    TRUE ~ "Other"  # Categorizes all other firms as "other"
+  )) %>% 
+  mutate(Company = factor(Company, levels = c("Sony", "Nintendo", "Microsoft", "Other")))
+
+
+# Identify the top 5 consoles
+top_consoles <- console_sales_clean %>%
+  arrange(desc(Units_sold)) %>%
+  slice(1:5)
+
+# Create the plot with adjusted annotations
+ggplot(console_sales_clean, aes(x = Released, y = Units_sold, size = Units_sold, color = Company)) +
+  geom_point(alpha = 0.7) +
+  geom_text(data = top_consoles, aes(label = Platform), vjust = 2.5, hjust = 1, size = 3, show.legend = FALSE) +  # Adjust label size and hide from legend
+  scale_color_manual(values = c("Nintendo" = "#6677a6", "Sony" = "#ae719d", "Microsoft" = "#26bb87", "Other" = "grey")) +
+  scale_size_continuous(name = "Units Sold (millions)", range = c(3, 10)) +
+  labs(title= "Sony and Nintendo dominate the console market, with Microsoft trailing in third",
+       subtitle = "Console Release Dates and Units Sold",
+       x = "Release Year",
+       y = "Units Sold (millions)") +
+  theme_minimal() +
+  theme(legend.position = "bottom") 
+
+
+```
+
+
+
+
+```{r, fig.width=9, fig.height=6}
+console_sales_clean %>%
+  arrange(desc(Units_sold)) %>%
+  slice(1:20) %>%
+  mutate(Firm = case_when(
+    Firm == "Sony" ~ "Sony",
+    Firm == "Nintendo" ~ "Nintendo",
+    Firm == "Microsoft" ~ "Microsoft",
+    TRUE ~ "Other" # Ensure capitalization is consistent
+  )) %>%
+  mutate(Firm = factor(Firm, levels = c("Sony", "Nintendo", "Microsoft", "Other"))) %>% 
+  ggplot(aes(x = reorder(Platform, Units_sold), y = Units_sold, fill = Firm)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_manual(values = c("Nintendo" = "#6677a6", "Sony" = "#ae719d", "Microsoft" = "#26bb87", "Other" = "grey")) +
+  labs(title = "Top 20 Best-Sellers for All Consoles Ever Released",
+       subtitle = "Annual Video Game Sales in Millions, 1970-Present: A Historical Perspective",
+       x = "Console",
+       y = "Units Sold (millions)") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+console_sales_clean %>%
+  filter(Released >= as.Date("2010-01-01")) %>%
+  arrange(desc(Units_sold)) %>%
+  slice(1:10) %>%
+  mutate(Firm = case_when(
+    Firm == "Sony" ~ "Sony",
+    Firm == "Nintendo" ~ "Nintendo",
+    Firm == "Microsoft" ~ "Microsoft",
+    TRUE ~ "Other" # Ensure capitalization is consistent
+  )) %>%
+  mutate(Firm = factor(Firm, levels = c("Sony", "Nintendo", "Microsoft", "Other"))) %>% # Convert to factor and specify level order
+  ggplot(aes(x = reorder(Platform, Units_sold), y = Units_sold, fill = Firm)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_manual(values = c("Nintendo" = "#6677a6", "Sony" = "#ae719d", "Microsoft" = "#26bb87", "Other" = "grey")) +
+  labs(title = "Top 10 Best-Sellers for Consoles Released Since 2010",
+       subtitle = "Annual Video Game Sales in Millions, 2010 - Present: A Modern Perspective",
+       x = "Console",
+       y = "Units Sold (millions)") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+
+```{r, fig.width=9, fig.height=6}
+# Create the stacked bar chart
+ggplot(ps, aes(x = Year, y = FY, fill = Console)) +
+  geom_bar(stat = "identity", position = "stack") +
+  scale_fill_manual(values = c("#4f516f", "#c270c9")) +  # Adjust colors as needed
+  labs(title="Sales peak a few years after release then decline until new generation is released.",
+       subtitle = "Annual Sales of PS4 and PS5",
+       x = "Year",
+       y = "Unit Sales in millions (FY)",
+       fill = "Console") +
+  theme_minimal()
+```
+
+```{r, fig.width=6, fig.height=6}
+playstation_games <- video_game_sales_clean %>%
+  filter(console %in% c("PS", "PS2", "PS3", "PS4", "PS5"))
+
+top_50_playstation <- playstation_games %>%
+  arrange(desc(total_sales_millions)) %>%
+  distinct(game, .keep_all = TRUE) %>% 
+  slice(1:50)
+
+# Assuming top_100_series is already created with the top 20 series
+wordcloud(words = top_50_playstation$game, freq = top_50_playstation$total_sales_millions,
+          min.freq = 1, max.words = 50, random.order = FALSE, rot.per = 0.35,
+          scale = c(2, 0.5),  # Adjust the scale
+          colors = brewer.pal(8, "Dark2"))
+
+```
+
+```{r, fig.width=9, fig.height=6}
+dota_2_tournaments <- tournament_data_clean %>% 
+  filter(game=='Dota 2') %>%
+  mutate(year = make_date(year = as.integer(str_sub(tournament, -4)))) %>% 
+  filter(year<'2023-01-01')
+
+# Group by year and sum the prize amounts
+yearly_prizes <- dota_2_tournaments %>%
+  group_by(year) %>%
+  summarise(total_prize = sum(prizepool))
+
+# Create an area graph
+ggplot(yearly_prizes, aes(x = year, y = total_prize)) +
+  geom_area(fill = "#4f516f", alpha = 0.8) +
+  scale_y_continuous(labels = scales::dollar_format()) +  # Format y-axis with dollar amounts
+  labs(title="But can you actually make money by playing video games? YES!",
+       subtitle = "Total Tournament Prize per Year for Dota 2, the Leading E-Sport",
+       x = "Year",
+       y = "Total Prize Amount (USD)") +
+  theme_minimal()
+```
+
+```{r, fig.width=9, fig.height=6}
+top_games_prize_pool <- tournament_data_clean %>%
+  group_by(game) %>%
+  summarise(total_prizepool = sum(prizepool)) %>%
+  arrange(desc(total_prizepool)) %>%
+  slice(1:5) %>%
+  mutate(game = fct_reorder(game, desc(total_prizepool)),
+         color = if_else(game == "Dota 2", "Dota 2", "Other"))
+
+# Create a bar chart with specific colors for Dota 2 and others
+ggplot(top_games_prize_pool, aes(x = game, y = total_prizepool, fill = color)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = c("Dota 2" = "#4f516f", "Other" = "gray")) +
+  scale_y_continuous(labels = scales::dollar_format()) +
+  labs(title = "Dota 2 dwarfs all other video games when it comes to prizepool",
+       subtitle = "Total Cumulative Prize Pool for Top 5 Games",
+       x = "Game",
+       y = "Total Prize Pool ($)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none")
+
+
+```
